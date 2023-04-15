@@ -13,6 +13,7 @@ import io.ktor.util.*
 import io.ktor.util.pipeline.*
 import io.opentelemetry.api.OpenTelemetry
 import io.opentelemetry.context.Context
+import io.opentelemetry.context.propagation.ContextPropagators
 import io.opentelemetry.extension.kotlin.asContextElement
 import io.opentelemetry.instrumentation.api.instrumenter.AttributesExtractor
 import io.opentelemetry.instrumentation.api.instrumenter.Instrumenter
@@ -24,11 +25,13 @@ import io.opentelemetry.instrumentation.api.instrumenter.http.HttpServerAttribut
 import io.opentelemetry.instrumentation.api.instrumenter.http.HttpServerMetrics
 import io.opentelemetry.instrumentation.api.instrumenter.http.HttpSpanNameExtractor
 import io.opentelemetry.instrumentation.api.instrumenter.http.HttpSpanStatusExtractor
+import io.opentelemetry.instrumentation.api.internal.ContextPropagationDebug
 import io.opentelemetry.instrumentation.ktor.v2_0.InstrumentationProperties.INSTRUMENTATION_NAME
 import kotlinx.coroutines.withContext
 
 class KtorServerTracing private constructor(
   private val instrumenter: Instrumenter<ApplicationRequest, ApplicationResponse>,
+  private val propagators: ContextPropagators,
 ) {
 
   class Configuration {
@@ -84,7 +87,11 @@ class KtorServerTracing private constructor(
       return null
     }
 
-    return instrumenter.start(parentContext, call.request)
+    // Manually propagate context from parent as PropagatingFromUpstreamInstrumenter does
+    ContextPropagationDebug.debugContextLeakIfEnabled()
+
+    val extracted = propagators.textMapPropagator.extract(parentContext, call.request, ApplicationRequestGetter)
+    return instrumenter.start(extracted, call.request)
   }
 
   private fun end(context: Context, call: ApplicationCall, error: Throwable?) {
@@ -122,12 +129,11 @@ class KtorServerTracing private constructor(
         addContextCustomizer(HttpRouteHolder.create(httpAttributesGetter))
       }
 
-      val instrumenter = instrumenterBuilder.buildIncomingInstrumenter(
-        ApplicationRequestGetter,
+      val instrumenter = instrumenterBuilder.buildInstrumenter(
         configuration.spanKindExtractor(SpanKindExtractor.alwaysServer())
       )
 
-      val feature = KtorServerTracing(instrumenter)
+      val feature = KtorServerTracing(instrumenter, configuration.openTelemetry.propagators)
 
       val startPhase = PipelinePhase("OpenTelemetry")
       pipeline.insertPhaseBefore(ApplicationCallPipeline.Monitoring, startPhase)
